@@ -1,0 +1,36 @@
+# Environment
+.env
+.env.local
+
+# Claude Code settings (may contain secrets)
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Data files (not code)
+servers.json
+backups/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
