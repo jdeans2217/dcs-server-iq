@@ -4,19 +4,23 @@
 Usage:
     python ingest_servers.py --input servers.json
     python ingest_servers.py --input servers.json --snapshot  # Also create snapshot records
+    python ingest_servers.py --input servers.json --snapshot --ping --ping-timeout 2  # One-time latency sample
 """
 
 import argparse
 import hashlib
+import platform
 import json
 import os
+import socket
+import subprocess
 import re
+import time
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
-from psycopg2.extras import execute_values, Json
 
 
 # Database connection settings
@@ -117,6 +121,7 @@ QQ_PATTERN = re.compile(r"(?:qq群?|QQ群?)[：:\s]*(\d{6,12})", re.IGNORECASE)
 WEBSITE_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 TACVIEW_PATTERN = re.compile(r"tacview[:\s]+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}[:\d]*)", re.IGNORECASE)
 TEAMSPEAK_PATTERN = re.compile(r"(?:ts|teamspeak)[:\s]+([a-zA-Z0-9\.\-]+(?::\d+)?)", re.IGNORECASE)
+PING_TIME_RE = re.compile(r"(?:time(?:=|<))([0-9]+(?:\.[0-9]+)?)\s*ms", re.IGNORECASE)
 
 
 def normalize_text(text: str) -> str:
@@ -232,6 +237,47 @@ def detect_language(text: str) -> Optional[str]:
     return "english"
 
 
+def measure_ping_ms(host: str, port: Optional[int] = None, timeout_seconds: float = 1.0) -> Optional[float]:
+    """Measure latency to a host in milliseconds."""
+    if not host:
+        return None
+
+    timeout_seconds = max(0.1, float(timeout_seconds))
+
+    try:
+        if platform.system().lower().startswith("win"):
+            cmd = ["ping", "-n", "1", "-w", str(max(100, int(timeout_seconds * 1000))), host]
+        else:
+            cmd = ["ping", "-c", "1", "-W", str(max(1, int(timeout_seconds))), host]
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds + 1,
+            check=False,
+        )
+        if proc.returncode == 0:
+            ping_output = f"{proc.stdout}\n{proc.stderr}"
+            match = PING_TIME_RE.search(ping_output)
+            if match:
+                return float(match.group(1))
+    except Exception:
+        pass
+
+    if port is None:
+        return None
+
+    start = time.perf_counter()
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout_seconds):
+            pass
+    except Exception:
+        return None
+
+    return round((time.perf_counter() - start) * 1000.0, 2)
+
+
 def enrich_server(server: Dict[str, Any]) -> Dict[str, Any]:
     """Apply all enrichment to a server record."""
     name = server.get("server_name", "") or ""
@@ -315,7 +361,13 @@ def create_lineage_record(cur, current_id: str, previous_id: str, match_type: st
     return result[0] if result else None
 
 
-def upsert_servers(conn, servers: List[Dict[str, Any]], create_snapshots: bool = False) -> Tuple[int, int, int, int]:
+def upsert_servers(
+    conn,
+    servers: List[Dict[str, Any]],
+    create_snapshots: bool = False,
+    measure_latency: bool = False,
+    ping_timeout: float = 1.0,
+) -> Tuple[int, int, int, int]:
     """Upsert servers into database. Returns (inserted, updated, snapshots, migrations)."""
     inserted = 0
     updated = 0
@@ -334,6 +386,9 @@ def upsert_servers(conn, servers: List[Dict[str, Any]], create_snapshots: bool =
 
             fingerprint = generate_fingerprint(ip, port, name)
             enrichment = enrich_server(server)
+            ping_ms = server.get("ping_ms")
+            if measure_latency:
+                ping_ms = measure_ping_ms(ip, port=port, timeout_seconds=ping_timeout)
 
             # Check if server exists by IP+port (the stable identifier)
             cur.execute("SELECT id FROM servers WHERE ip_address = %s::inet AND port = %s", (ip, port))
@@ -353,6 +408,7 @@ def upsert_servers(conn, servers: List[Dict[str, Any]], create_snapshots: bool =
                         mission = %s,
                         mission_time_secs = %s,
                         description = %s,
+                        ping_ms = %s,
                         terrain = COALESCE(%s, terrain),
                         era = COALESCE(%s, era),
                         game_mode = COALESCE(%s, game_mode),
@@ -377,6 +433,7 @@ def upsert_servers(conn, servers: List[Dict[str, Any]], create_snapshots: bool =
                     server.get("mission"),
                     server.get("mission_time_seconds"),
                     server.get("description"),
+                    ping_ms,
                     enrichment["terrain"],
                     enrichment["era"],
                     enrichment["game_mode"],
@@ -399,7 +456,7 @@ def upsert_servers(conn, servers: List[Dict[str, Any]], create_snapshots: bool =
                     INSERT INTO servers (
                         fingerprint, server_name, ip_address, port,
                         players_current, players_max, password_required,
-                        dcs_version, mission, mission_time_secs, description,
+                        dcs_version, mission, mission_time_secs, description, ping_ms,
                         terrain, era, game_mode, framework, language,
                         discord_url, srs_address, qq_group, website_url,
                         tacview_address, teamspeak_address,
@@ -408,6 +465,7 @@ def upsert_servers(conn, servers: List[Dict[str, Any]], create_snapshots: bool =
                         %s, %s, %s::inet, %s,
                         %s, %s, %s,
                         %s, %s, %s, %s,
+                        %s,
                         %s, %s, %s, %s, %s,
                         %s, %s, %s, %s,
                         %s, %s,
@@ -423,6 +481,7 @@ def upsert_servers(conn, servers: List[Dict[str, Any]], create_snapshots: bool =
                         mission = EXCLUDED.mission,
                         mission_time_secs = EXCLUDED.mission_time_secs,
                         description = EXCLUDED.description,
+                        ping_ms = EXCLUDED.ping_ms,
                         terrain = COALESCE(EXCLUDED.terrain, servers.terrain),
                         era = COALESCE(EXCLUDED.era, servers.era),
                         game_mode = COALESCE(EXCLUDED.game_mode, servers.game_mode),
@@ -441,6 +500,7 @@ def upsert_servers(conn, servers: List[Dict[str, Any]], create_snapshots: bool =
                     fingerprint, name, ip, port,
                     server.get("players_current"), server.get("players_max"), server.get("password_required"),
                     server.get("dcs_version"), server.get("mission"), server.get("mission_time_seconds"), server.get("description"),
+                    ping_ms,
                     enrichment["terrain"], enrichment["era"], enrichment["game_mode"], enrichment["framework"], enrichment["language"],
                     enrichment["discord_url"], enrichment["srs_address"], enrichment["qq_group"], enrichment["website_url"],
                     enrichment["tacview_address"], enrichment["teamspeak_address"],
@@ -468,13 +528,13 @@ def upsert_servers(conn, servers: List[Dict[str, Any]], create_snapshots: bool =
                 cur.execute("""
                     INSERT INTO server_snapshots (
                         server_id, captured_at, server_name, players_current, players_max,
-                        mission, mission_time_secs, dcs_version, is_online, content_hash
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        mission, mission_time_secs, dcs_version, is_online, ping_ms, content_hash
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     server_id, now, name,
                     server.get("players_current"), server.get("players_max"),
                     server.get("mission"), server.get("mission_time_seconds"),
-                    server.get("dcs_version"), True, content_hash,
+                    server.get("dcs_version"), True, ping_ms, content_hash,
                 ))
                 snapshot_count += 1
 
@@ -570,6 +630,8 @@ def main() -> int:
     parser.add_argument("--input", "-i", default="servers.json", help="Input JSON file")
     parser.add_argument("--snapshot", "-s", action="store_true", help="Create snapshot records")
     parser.add_argument("--stats", action="store_true", help="Update ecosystem stats")
+    parser.add_argument("--ping", action="store_true", help="Measure server ping latency during ingest")
+    parser.add_argument("--ping-timeout", type=float, default=1.0, help="Per-server ping timeout in seconds (for --ping)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
 
     args = parser.parse_args()
@@ -586,7 +648,13 @@ def main() -> int:
     try:
         # Upsert servers
         print("Upserting servers with enrichment...")
-        inserted, updated, snapshots, migrations = upsert_servers(conn, servers, create_snapshots=args.snapshot)
+        inserted, updated, snapshots, migrations = upsert_servers(
+            conn,
+            servers,
+            create_snapshots=args.snapshot,
+            measure_latency=args.ping,
+            ping_timeout=args.ping_timeout,
+        )
         print(f"  Inserted: {inserted}, Updated: {updated}, Snapshots: {snapshots}, Migrations: {migrations}")
 
         # Update host clusters

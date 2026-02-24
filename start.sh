@@ -29,6 +29,11 @@ trap cleanup SIGINT SIGTERM
 
 cd "$(dirname "$0")"
 
+# Load environment variables
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+fi
+
 echo "Starting DCS Server Intelligence..."
 echo ""
 

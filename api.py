@@ -7,7 +7,11 @@ Usage:
 
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent / ".env")
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -79,6 +83,7 @@ class ServerSummary(BaseModel):
     era: Optional[str]
     game_mode: Optional[str]
     framework: Optional[str]
+    ping_ms: Optional[float]
     discord_url: Optional[str]
     srs_address: Optional[str]
     mission: Optional[str]
@@ -117,6 +122,7 @@ class ServerSnapshot(BaseModel):
     players_max: Optional[int]
     mission: Optional[str]
     is_online: bool
+    ping_ms: Optional[float]
 
 
 class HostCluster(BaseModel):
@@ -218,7 +224,7 @@ def get_servers(
     has_discord: Optional[bool] = Query(None, description="Has Discord link"),
     has_srs: Optional[bool] = Query(None, description="Has SRS address"),
     has_password: Optional[bool] = Query(None, description="Password required"),
-    sort: str = Query("players", description="Sort by: players, name, trend, health"),
+    sort: str = Query("players", description="Sort by: players, name, trend, health, last_seen, ping"),
     order: str = Query("desc", description="Order: asc, desc"),
     limit: int = Query(100, ge=1, le=500, description="Max results"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
@@ -261,6 +267,7 @@ def get_servers(
         "trend": "trend_7d",
         "health": "health_score",
         "last_seen": "last_seen",
+        "ping": "ping_ms",
     }
     sort_col = sort_map.get(sort, "players_current")
     order_dir = "DESC" if order.lower() == "desc" else "ASC"
@@ -269,13 +276,13 @@ def get_servers(
     null_order = "NULLS LAST" if order.lower() == "desc" else "NULLS FIRST"
 
     query = f"""
-        SELECT
-            id::text, server_name, ip_address::text, port,
-            players_current, players_max, password_required,
-            terrain, era, game_mode, framework,
-            discord_url, srs_address, mission, dcs_version,
-            trend_7d, health_score, last_seen
-        FROM servers
+            SELECT
+                id::text, server_name, ip_address::text, port,
+                players_current, players_max, password_required,
+                terrain, era, game_mode, framework, ping_ms,
+                discord_url, srs_address, mission, dcs_version,
+                trend_7d, health_score, last_seen
+            FROM servers
         {where_clause}
         ORDER BY {sort_col} {order_dir} {null_order}
         LIMIT %s OFFSET %s
@@ -299,7 +306,7 @@ def get_server(server_id: str):
                 SELECT
                     id::text, server_name, ip_address::text, port,
                     players_current, players_max, password_required,
-                    terrain, era, game_mode, framework,
+                    terrain, era, game_mode, framework, ping_ms,
                     discord_url, srs_address, mission, dcs_version,
                     trend_7d, health_score, last_seen,
                     description, mission_time_secs, language,
@@ -330,7 +337,8 @@ def get_server_history(
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT captured_at, players_current, players_max, mission, is_online
+                SELECT
+                    captured_at, players_current, players_max, mission, is_online, ping_ms
                 FROM server_snapshots
                 WHERE server_id = %s::uuid
                   AND captured_at > NOW() - INTERVAL '%s hours'
@@ -410,7 +418,7 @@ def get_host_clusters(
                         SELECT
                             id::text, server_name, ip_address::text, port,
                             players_current, players_max, password_required,
-                            terrain, era, game_mode, framework,
+                            terrain, era, game_mode, framework, ping_ms,
                             discord_url, srs_address, mission, dcs_version,
                             trend_7d, health_score, last_seen
                         FROM servers
@@ -493,7 +501,7 @@ def get_leaderboard(
                 SELECT
                     id::text, server_name, ip_address::text, port,
                     players_current, players_max, password_required,
-                    terrain, era, game_mode, framework,
+                    terrain, era, game_mode, framework, ping_ms,
                     discord_url, srs_address, mission, dcs_version,
                     trend_7d, health_score, last_seen
                 FROM servers
@@ -519,7 +527,7 @@ def search_servers(
                 SELECT
                     id::text, server_name, ip_address::text, port,
                     players_current, players_max, password_required,
-                    terrain, era, game_mode, framework,
+                    terrain, era, game_mode, framework, ping_ms,
                     discord_url, srs_address, mission, dcs_version,
                     trend_7d, health_score, last_seen,
                     ts_rank(

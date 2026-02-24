@@ -127,6 +127,13 @@ PGPASSWORD=your_db_password
 
 Run the SQL schema to create required tables (schema file coming soon, or inspect `ingest_servers.py` for table definitions).
 
+If ping capture has already been running before this change, add latency columns once:
+
+```sql
+ALTER TABLE servers ADD COLUMN IF NOT EXISTS ping_ms numeric;
+ALTER TABLE server_snapshots ADD COLUMN IF NOT EXISTS ping_ms numeric;
+```
+
 ### 6. Start the Application
 
 ```bash
@@ -157,6 +164,9 @@ python fetch_servers.py --out servers.json
 
 # Ingest into database with snapshots
 python ingest_servers.py --input servers.json --snapshot --stats
+
+# One-time latency capture while ingesting
+python ingest_servers.py --input servers.json --snapshot --stats --ping --ping-timeout 2
 ```
 
 ### Automated Refresh
