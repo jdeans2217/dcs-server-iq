@@ -18,9 +18,14 @@ import re
 import time
 import unicodedata
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
+from dotenv import load_dotenv
+
+
+load_dotenv(Path(__file__).parent / ".env")
 
 
 # Database connection settings

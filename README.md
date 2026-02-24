@@ -125,14 +125,20 @@ PGPASSWORD=your_db_password
 
 ### 5. Initialize Database
 
-Run the SQL schema to create required tables (schema file coming soon, or inspect `ingest_servers.py` for table definitions).
+This repository now includes a schema and init script:
 
-If ping capture has already been running before this change, add latency columns once:
-
-```sql
-ALTER TABLE servers ADD COLUMN IF NOT EXISTS ping_ms numeric;
-ALTER TABLE server_snapshots ADD COLUMN IF NOT EXISTS ping_ms numeric;
+```bash
+./scripts/init_db.sh
 ```
+
+By default, the script uses:
+
+- `PGHOST=127.0.0.1`
+- `PGPORT=55432`
+- `PGDATABASE=dcs_server_iq`
+- `PGUSER=walter`
+
+Override these in `.env` if your local PostgreSQL settings differ.
 
 ### 6. Start the Application
 
